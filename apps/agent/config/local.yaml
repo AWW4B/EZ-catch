@@ -1,0 +1,24 @@
+# ============================================================
+# apps/agent/config/local.yaml
+# Local (bare-metal, Arch Linux) configuration for the agent.
+# ============================================================
+
+agent:
+  # Path to the auditd log.  Requires root read access.
+  audit_log: /var/log/audit/audit.log
+
+  # mitmproxy listen port for the network interceptor
+  mitm_port: 8080
+
+buffer:
+  # Path to the local SQLite WAL database.
+  # Can be overridden with the DB_PATH environment variable.
+  db_path: ./local_buffer.db
+
+forwarder:
+  # Backend ingest endpoint
+  backend_url: http://localhost:8000/api/v1/ingest
+  # Seconds between flush cycles
+  flush_interval: 3.0
+  # Events per HTTP POST batch
+  batch_size: 50

@@ -1,0 +1,62 @@
+services:
+  # ── Backend API ────────────────────────────────────────────
+  backend:
+    build:
+      context: apps/backend
+      dockerfile: Dockerfile
+    container_name: agent-monitor-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DB_PATH=/app/data/agent_monitor.db
+      - LOG_LEVEL=info
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:3001
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── Admin Panel (Next.js) ──────────────────────────────────
+  admin-panel:
+    build:
+      context: apps/frontend/admin-panel
+      dockerfile: Dockerfile
+    container_name: agent-monitor-admin-panel
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./apps/frontend/admin-panel:/app
+      - /app/node_modules
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NODE_ENV=development
+      - WATCHPACK_POLLING=true
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # ── Enterprise: PostgreSQL (future) ───────────────────────
+  # Uncomment when ready to move off SQLite.
+  # postgres:
+  #   image: postgres:16-alpine
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: agentmonitor
+  #     POSTGRES_PASSWORD: changeme
+  #     POSTGRES_DB: agentmonitor
+  #   volumes:
+  #     - pg_data:/var/lib/postgresql/data
+
+  # ── Enterprise: Redis (future rate-limiting / alerts) ─────
+  # redis:
+  #   image: redis:7-alpine
+  #   restart: unless-stopped
+
+# volumes:
+#   pg_data:

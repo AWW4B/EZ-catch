@@ -1,0 +1,21 @@
+# ============================================================
+# apps/agent/config/cloud.yaml
+# Cloud / enterprise deployment configuration for the agent.
+# Used when the agent runs inside a managed container or VM
+# alongside the backend service.
+# ============================================================
+
+agent:
+  audit_log: /var/log/audit/audit.log
+  mitm_port: 8080
+
+buffer:
+  # In cloud mode the agent uses an ephemeral in-memory path;
+  # the forwarder flushes frequently so data loss is minimal.
+  db_path: /tmp/agent_buffer.db
+
+forwarder:
+  # In Docker Compose the backend is reachable at the service name.
+  backend_url: http://backend:8000/api/v1/ingest
+  flush_interval: 1.0
+  batch_size: 100

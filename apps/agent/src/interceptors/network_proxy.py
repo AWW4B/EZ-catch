@@ -1,44 +1,229 @@
-"""
-AI IDE CONTEXT:
-This is a mitmproxy addon script. 
-Goal: Intercept HTTPS traffic from local AI tools (Claude Code, VS Code Copilot, OpenClaw).
-We need to capture prompts, tool calls, and especially the model's reasoning/thinking blocks.
-Do NOT block traffic yet; this is purely an observation prototype.
-"""
-from mitmproxy import http
-import json
-import logging
-# In a real environment, this imports from our shared package:
-# from packages.schemas.events import NetworkIntercept, LLMReasoningContext
+from __future__ import annotations
 
-logger = logging.getLogger("AgentProxy")
+import json
+import re
+import sys
+import threading
+from pathlib import Path
+from urllib.parse import urlparse
+
+def _find_root():
+    curr = Path(__file__).resolve().parent
+    for _ in range(10):
+        if (curr / "apps").exists() or (curr / "packages").exists():
+            return curr
+        if curr.parent == curr:
+            break
+        curr = curr.parent
+    return curr
+
+sys.path.insert(0, str(_find_root()))
+
+from packages.schemas.events import LLMReasoningContext, NetworkIntercept
+from apps.agent.src.core.buffer import LocalSQLiteBuffer
+
+from mitmproxy import http
+
+TARGET_DOMAINS = frozenset({
+    "api.anthropic.com",
+    "api.openai.com",
+    "localhost",
+    "127.0.0.1",
+    "::1",
+})
+
+_RE_THINKING = re.compile(
+    r"<(?:thinking|thought)>(.*?)</(?:thinking|thought)>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+_buffer = LocalSQLiteBuffer()
+
+
+def _is_target(host: str) -> bool:
+    host = host.lower().split(":")[0]
+    return host in TARGET_DOMAINS or any(host.endswith("." + d) for d in TARGET_DOMAINS)
+
+
+def _extract_request_body(flow: http.HTTPFlow) -> str | None:
+    try:
+        return flow.request.get_text(strict=False) or None
+    except Exception:
+        return None
+
+
+def _extract_prompt(req_body: str | None) -> str | None:
+    if not req_body:
+        return None
+    try:
+        data = json.loads(req_body)
+        messages = data.get("messages") or []
+        parts: list[str] = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                parts.append(f"[{role}] {content}")
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(f"[{role}] {block.get('text', '')}")
+        return "\n".join(parts) if parts else None
+    except Exception:
+        return None
+
+
+def _identify_llm(host: str, path: str) -> str:
+    if "anthropic" in host:
+        return "claude"
+    if "openai" in host:
+        if "gpt-4" in path:
+            return "gpt-4"
+        if "gpt-3" in path:
+            return "gpt-3.5"
+        return "openai"
+    return "local"
+
+
+def _extract_response_text(data: dict) -> str | None:
+    # Anthropic shape
+    content = data.get("content")
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif block.get("type") == "thinking":
+                    parts.append(block.get("thinking", ""))
+        if parts:
+            return "\n".join(parts)
+
+    # OpenAI shape
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        msg = choices[0].get("message", {})
+        return msg.get("content") or msg.get("reasoning_content") or None
+
+    return None
+
+
+def _extract_thinking(text: str | None) -> str | None:
+    if not text:
+        return None
+    matches = _RE_THINKING.findall(text)
+    return "\n---\n".join(m.strip() for m in matches) if matches else None
+
+
+def _extract_tool_calls(data: dict) -> list[dict]:
+    tool_calls: list[dict] = []
+
+    # Anthropic tool_use blocks
+    content = data.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                tool_calls.append({
+                    "name": block.get("name"),
+                    "id": block.get("id"),
+                    "input": block.get("input"),
+                })
+
+    # OpenAI tool_calls
+    choices = data.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            msg = choice.get("message", {})
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function", {})
+                args = fn.get("arguments")
+                try:
+                    args = json.loads(args) if isinstance(args, str) else args
+                except Exception:
+                    pass
+                tool_calls.append({
+                    "name": fn.get("name"),
+                    "id": tc.get("id"),
+                    "input": args,
+                })
+
+    return tool_calls
+
+
+def _build_and_push(flow: http.HTTPFlow) -> None:
+    try:
+        resp_text = flow.response.get_text(strict=False) if flow.response else None
+        if not resp_text:
+            return
+
+        try:
+            data = json.loads(resp_text)
+        except Exception:
+            return
+
+        if not isinstance(data, dict):
+            return
+
+        raw_text   = _extract_response_text(data)
+        thinking   = _extract_thinking(raw_text)
+        tool_calls = _extract_tool_calls(data)
+
+        if not raw_text and not tool_calls:
+            return
+
+        req_body = _extract_request_body(flow)
+        prompt   = _extract_prompt(req_body)
+
+        parsed  = urlparse(flow.request.pretty_url)
+        host    = parsed.hostname or ""
+        target  = _identify_llm(host, parsed.path)
+
+        reasoning: LLMReasoningContext | None = None
+        if raw_text or thinking:
+            reasoning = LLMReasoningContext(
+                prompt=prompt,
+                raw_response=raw_text,
+                extracted_thinking=thinking,
+                target_llm=target,
+            )
+
+        pid = 0
+        try:
+            import os
+            pid = os.getpid()
+        except Exception:
+            pass
+
+        event = NetworkIntercept(
+            source_process="mitmproxy",
+            pid=pid,
+            event_type="network_intercept",
+            url=flow.request.pretty_url,
+            method=flow.request.method,
+            status_code=flow.response.status_code if flow.response else None,
+            request_body=req_body,
+            response_body=resp_text[:8192] if resp_text else None,
+            reasoning_context=reasoning,
+            tool_calls=tool_calls,
+        )
+
+        _buffer.push_event(event)
+
+    except Exception:
+        pass
+
 
 class AgentInferenceInterceptor:
-    def __init__(self):
-        # We monitor standard LLM providers and local loopbacks (for inter-agent comms)
-        self.target_hosts = ["api.anthropic.com", "api.openai.com", "localhost", "127.0.0.1"]
-
-    def request(self, flow: http.HTTPFlow) -> None:
-        """
-        AI IDE TODO: Parse outgoing requests.
-        Identify if it's an LLM inference request. Extract the system prompt and user messages.
-        If it's localhost traffic, it might be Agent A talking to Agent B (e.g., AutoGen/CrewAI).
-        """
-        if flow.request.pretty_host in self.target_hosts:
-            # AI: Add extraction logic here and push to the local core/buffer.py
-            pass
-
     def response(self, flow: http.HTTPFlow) -> None:
-        """
-        AI IDE TODO: Parse incoming LLM responses.
-        1. Extract the raw text.
-        2. Regex search for <thinking>, <thought>, or tool_call arguments to capture reasoning.
-        3. Identify what action the agent decided to take based on this reasoning.
-        """
-        if flow.request.pretty_host in self.target_hosts and flow.response.content:
-            # AI: Add parsing logic for OpenAI/Anthropic JSON response schemas here
-            pass
+        host = (flow.request.host or "").lower()
+        if not _is_target(host):
+            return
 
-addons = [
-    AgentInferenceInterceptor()
-]
+        ct = flow.response.headers.get("content-type", "") if flow.response else ""
+        if "json" not in ct and "text" not in ct and ct != "":
+            return
+
+        threading.Thread(target=_build_and_push, args=(flow,), daemon=True).start()
+
+
+addons = [AgentInferenceInterceptor()]

@@ -27,6 +27,8 @@ from mitmproxy import http
 TARGET_DOMAINS = frozenset({
     "api.anthropic.com",
     "api.openai.com",
+    "generativelanguage.googleapis.com",
+    "googleapis.com",
     "localhost",
     "127.0.0.1",
     "::1",
@@ -57,8 +59,22 @@ def _extract_prompt(req_body: str | None) -> str | None:
         return None
     try:
         data = json.loads(req_body)
-        messages = data.get("messages") or []
         parts: list[str] = []
+        
+        # Gemini shape
+        contents = data.get("contents")
+        if isinstance(contents, list):
+            for content in contents:
+                role = content.get("role", "")
+                c_parts = content.get("parts", [])
+                for p in c_parts:
+                    if isinstance(p, dict) and "text" in p:
+                        parts.append(f"[{role}] {p['text']}")
+            if parts:
+                return "\n".join(parts)
+
+        # OpenAI / Anthropic shape
+        messages = data.get("messages") or []
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
@@ -82,10 +98,21 @@ def _identify_llm(host: str, path: str) -> str:
         if "gpt-3" in path:
             return "gpt-3.5"
         return "openai"
+    if "google" in host:
+        return "gemini"
     return "local"
 
 
 def _extract_response_text(data: dict) -> str | None:
+    # Gemini shape
+    candidates = data.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        content = candidates[0].get("content", {})
+        parts = content.get("parts", [])
+        text_parts = [p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p]
+        if text_parts:
+            return "\n".join(text_parts)
+
     # Anthropic shape
     content = data.get("content")
     if isinstance(content, list):

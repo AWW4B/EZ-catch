@@ -179,47 +179,47 @@ def _extract_tool_calls(data: dict) -> list[dict]:
 
 def _build_and_push(flow: http.HTTPFlow) -> None:
     try:
-        resp_text = flow.response.get_text(strict=False) if flow.response else None
-        if not resp_text:
-            return
+        import os as _os
+        pid = _os.getpid()
 
-        try:
-            data = json.loads(resp_text)
-        except Exception:
-            return
+        resp_text: str | None = None
+        data: dict = {}
+        raw_text: str | None = None
+        thinking: str | None = None
+        tool_calls: list[dict] = []
+        reasoning: LLMReasoningContext | None = None
 
-        if not isinstance(data, dict):
-            return
+        if flow.response:
+            try:
+                resp_text = flow.response.get_text(strict=False) or None
+            except Exception:
+                pass
 
-        raw_text   = _extract_response_text(data)
-        thinking   = _extract_thinking(raw_text)
-        tool_calls = _extract_tool_calls(data)
-
-        if not raw_text and not tool_calls:
-            return
+        if resp_text:
+            try:
+                parsed_json = json.loads(resp_text)
+                if isinstance(parsed_json, dict):
+                    data = parsed_json
+                    raw_text   = _extract_response_text(data)
+                    thinking   = _extract_thinking(raw_text)
+                    tool_calls = _extract_tool_calls(data)
+            except Exception:
+                pass
 
         req_body = _extract_request_body(flow)
         prompt   = _extract_prompt(req_body)
 
-        parsed  = urlparse(flow.request.pretty_url)
-        host    = parsed.hostname or ""
-        target  = _identify_llm(host, parsed.path)
+        parsed_url = urlparse(flow.request.pretty_url)
+        host       = parsed_url.hostname or ""
+        target     = _identify_llm(host, parsed_url.path)
 
-        reasoning: LLMReasoningContext | None = None
-        if raw_text or thinking:
+        if raw_text or thinking or prompt:
             reasoning = LLMReasoningContext(
                 prompt=prompt,
                 raw_response=raw_text,
                 extracted_thinking=thinking,
                 target_llm=target,
             )
-
-        pid = 0
-        try:
-            import os
-            pid = os.getpid()
-        except Exception:
-            pass
 
         event = NetworkIntercept(
             source_process="mitmproxy",
@@ -235,9 +235,10 @@ def _build_and_push(flow: http.HTTPFlow) -> None:
         )
 
         _buffer.push_event(event)
+        print(f"[PROXY] Captured {flow.request.method} {flow.request.pretty_url[:80]} → {flow.response.status_code if flow.response else '?'}", flush=True)
 
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[PROXY] Error in _build_and_push: {exc}", flush=True)
 
 
 class AgentInferenceInterceptor:

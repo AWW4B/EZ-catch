@@ -31,6 +31,12 @@ NOISE_EXECUTABLES = frozenset({
     "/usr/bin/dconf", "/usr/lib/gvfs/gvfsd", "audispd", "/sbin/auditctl",
 })
 
+NOISE_STRINGS = [
+    "KeyboardLayout.sh",
+    "hyprctl devices",
+    "sed -n s/^cpu",
+]
+
 TERMINAL_PARENTS = frozenset({
     "bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh",
     "alacritty", "kitty", "gnome-terminal", "konsole", "xterm",
@@ -129,6 +135,11 @@ class ArchAuditMonitor:
 
         args  = ctx.get("args", [])
         cmd   = " ".join(args) if args else exe
+        
+        for noise in NOISE_STRINGS:
+            if noise in cmd:
+                return
+
         uid   = ctx.get("uid", "0")
         cwd   = ctx.get("cwd")
 

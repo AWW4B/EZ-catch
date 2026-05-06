@@ -35,6 +35,19 @@ NOISE_STRINGS = [
     "KeyboardLayout.sh",
     "hyprctl devices",
     "sed -n s/^cpu",
+    "Hyprsunset.sh",
+    ".hyprsunset_state",
+    "jq -r",
+    "OneCollector",
+    "Hyprland.sh",
+    "swww",
+    "hyprctl",
+    "pgrep",
+    "git status",
+    "git config",
+    "git for-each-ref",
+    "git rev-parse",
+    "git ls-files",
 ]
 
 TERMINAL_PARENTS = frozenset({
@@ -104,12 +117,18 @@ def _uid_to_username(uid: str) -> str:
         return uid
 
 
-def _is_interesting(exe: str, ppid: int) -> bool:
-    if exe in NOISE_EXECUTABLES:
+def _is_interesting(exe: str, ppid: int, uid: str = "0") -> bool:
+    """
+    Returns True if the process should be captured.
+    Strictly focuses on user 'allain' (UID 1000) and terminal-like parents.
+    """
+    if uid != "1000":
         return False
+
     exe_name = Path(exe).name
-    if exe_name in NOISE_EXECUTABLES:
+    if exe_name in NOISE_EXECUTABLES or exe in NOISE_EXECUTABLES:
         return False
+
     try:
         comm_path = f"/proc/{ppid}/comm"
         parent_comm = Path(comm_path).read_text().strip()
@@ -117,7 +136,13 @@ def _is_interesting(exe: str, ppid: int) -> bool:
             return True
     except OSError:
         pass
-    return exe_name not in NOISE_EXECUTABLES
+
+    # Fallback: if it's explicitly a tool we care about
+    for interest in ["python", "node", "git", "ls", "pwd", "cmatrix", "antigravity", "claude"]:
+        if interest in exe_name:
+            return True
+
+    return False
 
 
 class ArchAuditMonitor:
@@ -129,8 +154,9 @@ class ArchAuditMonitor:
         exe  = ctx.get("exe", "")
         pid  = ctx.get("pid", 0)
         ppid = ctx.get("ppid", 0)
+        uid  = ctx.get("uid", "0")
 
-        if not exe or not _is_interesting(exe, ppid):
+        if not exe or not _is_interesting(exe, ppid, uid):
             return
 
         args  = ctx.get("args", [])

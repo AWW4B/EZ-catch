@@ -36,6 +36,13 @@ class NetworkIntercept(BaseEvent):
     reasoning_context: Optional[LLMReasoningContext] = Field(default=None, description="Parsed LLM context if the request targets an LLM API")
     tool_calls: Optional[list[dict[str, Any]]] = Field(default_factory=list, description="Tool/function calls extracted from the LLM response payload")
 
+    # ── Flat LLM fields (populated by network_proxy.py for Anthropic/OpenAI calls) ──
+    model: Optional[str] = Field(default=None, description="LLM model name, e.g. 'claude-opus-4-5'")
+    prompt: Optional[str] = Field(default=None, description="The user-role message sent to the LLM")
+    system_prompt: Optional[str] = Field(default=None, description="The system field / system prompt")
+    reasoning: Optional[str] = Field(default=None, description="Concatenated thinking/reasoning blocks from the response")
+    response: Optional[str] = Field(default=None, description="Concatenated text blocks from the response")
+
 
 class TerminalAction(BaseEvent):
     event_type: str = Field(default="terminal_action")

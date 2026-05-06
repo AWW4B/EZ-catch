@@ -191,8 +191,10 @@ class ArchAuditMonitor:
             del self._pending[oldest]
 
     def run(self) -> None:
+        # -n 0 tells tail to start from the END of the file (no historical lines).
+        # This prevents replaying all past EXECVE events on every agent restart.
         proc = subprocess.Popen(
-            ["tail", "-F", AUDIT_LOG],
+            ["tail", "-F", "-n", "0", AUDIT_LOG],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
